@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 
 import pytest
@@ -36,6 +37,27 @@ class EachScheduling:
         else:
             self.log = log.eachsched
         self.collection_is_completed = False
+        self._allowed_workers = self._parse_allowed_workers()
+
+    def _parse_allowed_workers(self) -> set[str]:
+        """Parse XDIST_ONLY environment variable to get allowed worker IDs."""
+        xdist_only = os.environ.get("XDIST_ALLOWED_WORKERS", "").strip()
+        if not xdist_only:
+            return set()  # Empty set means all workers are allowed
+        
+        worker_ids = []
+        for worker_id in xdist_only.split(","):
+            worker_id = worker_id.strip()
+            if worker_id:
+                worker_ids.append(worker_id)
+        
+        return set(worker_ids)
+
+    def _is_allowed_worker(self, node: WorkerController) -> bool:
+        """Check if a worker is allowed to run tests based on XDIST_ONLY."""
+        if not self._allowed_workers:  # Empty set means all workers allowed
+            return True
+        return node.gateway.id in self._allowed_workers
 
     @property
     def nodes(self) -> list[WorkerController]:
@@ -138,11 +160,22 @@ class EachScheduling:
         needs to run all the tests.  If the pending list is already
         populated (by ``.add_node_collection()``) then it replaces a
         dead node and we only need to run those tests.
+        
+        When XDIST_ALLOWED_WORKERS environment variable is set, only workers 
+        specified in that variable will run tests, others remain idle.
         """
         assert self.collection_is_completed
         for node, pending in self.node2pending.items():
             if node in self._started:
                 continue
+            
+            # Check if this worker is allowed to run tests
+            if not self._is_allowed_worker(node):
+                # Mark as started but don't send any tests, just shutdown
+                node.shutdown()
+                self._started.append(node)
+                continue
+                
             if not pending:
                 pending[:] = range(len(self.node2collection[node]))
                 node.send_runtest_all()
